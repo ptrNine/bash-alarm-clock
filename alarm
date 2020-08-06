@@ -1,0 +1,129 @@
+#!/bin/bash
+
+CURRENT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" >/dev/null 2>&1 && pwd )"
+ALARM_DATA_DIR="$CURRENT_DIR/.alarm"
+
+mkdir -p "$ALARM_DATA_DIR"
+
+echoerr() {
+    echo "$@" 1>&2;
+}
+
+get_timestamp() {
+    date +"%s"
+}
+
+timestamp_to_date() {
+    date -d @"$1" +'%Y-%m-%d %H:%M:%S'
+}
+
+get_date() {
+    if [[ $1 =~ '^[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}.*$' ]]; then
+        echo "$1"
+        date -d "$1" +%s
+    else
+        dt=$(date +'%Y-%m-%d')
+        time=$(date -d "$dt $1" +%s)
+        curr=`get_timestamp`
+        [ $curr -gt $time ] && time=$((time+86400))
+        timestamp_to_date "$time"
+    fi
+}
+
+date_to_timestamp() {
+    dt=$(get_date "$1")
+    date -d "$dt" +%s
+}
+
+get_free_index() {
+    local i=0
+    while test -f "$ALARM_DATA_DIR/$i.pid"; do i=$((i+1)); done
+    echo "$i"
+}
+
+run_alarm() {
+    local alarm_time=$(date_to_timestamp "$1")
+    local index="$2"
+    local action="$3"
+
+    echo $(get_date "$1") > "$ALARM_DATA_DIR/$index.time"
+
+    echo "#!/bin/bash" > "$ALARM_DATA_DIR/$index.action"
+    echo "$action" >> "$ALARM_DATA_DIR/$index.action"
+    chmod +x "$ALARM_DATA_DIR/$index.action"
+
+    while sleep 0.5; do
+        tmst=$(get_timestamp)
+        if [ $tmst -gt $alarm_time ]; then
+            "$ALARM_DATA_DIR/$index.action"
+            rm -f "$ALARM_DATA_DIR/$index.pid"
+            rm -f "$ALARM_DATA_DIR/$index.action"
+            rm -f "$ALARM_DATA_DIR/$index.time"
+            exit 0
+        fi
+    done
+}
+
+list_alarms() {
+    echo "Active alarms: "
+    IFS=$'\n'
+    local pid_files=($(find "$ALARM_DATA_DIR" -name '*.pid'))
+    for pidfile in ${pid_files[@]}; do
+        index="${pidfile%*.pid}"
+        index="${index##*/}"
+        printf "$index:\t`cat $ALARM_DATA_DIR/$index.time`\n\tAction:\n"
+        readarray -t action < "$ALARM_DATA_DIR/$index.action"
+        for line in ${action[@]}; do
+            echo $'\t\t'"$line"
+        done
+    done
+}
+
+stop_alarm() {
+    local index="$1"
+    if test -f "$ALARM_DATA_DIR/$index.pid"; then
+        pid=$(cat "$ALARM_DATA_DIR/$index.pid")
+        if [ -d "/proc/$pid" ]; then
+            echo "Kill alarm process with pid $pid"
+            kill $pid
+        fi
+        rm -f "$ALARM_DATA_DIR/$index.pid"
+        rm -f "$ALARM_DATA_DIR/$index.action"
+        rm -f "$ALARM_DATA_DIR/$index.time"
+    else
+        echoerr "Alarm with index $index does not exist!"
+    fi
+}
+
+case "$1" in
+start)
+    idx=`get_free_index`
+
+    if [ -z "$2" ]; then echoerr "Missing date (should be in 'YYYY-MM-DD hh:mm' or hh:mm)"; exit 1; fi
+    if [ -z "$3" ]; then echoerr "Missing path to audio file"; exit 1; fi
+
+    if [ "$3" == 'chrome' ]; then
+        if [ -z "$4" ]; then echoerr "Missing URL"; exit 1; fi
+        command="google-chrome $4 > /dev/null 2>&1"
+    else
+        audio="$(realpath "$3")"
+        command="pactl set-sink-volume 0 150% && celluloid \"$audio\""
+    fi
+
+    run_alarm "$2" "$idx" "$command &" & \
+        echo $! > "$ALARM_DATA_DIR/$idx.pid"
+    echo "Alarm with index $idx started."
+    ;;
+stop)
+    [ -n "$2" ] && stop_alarm "$2" || echoerr "Missing alarm index"
+    ;;
+list)
+    list_alarms
+    ;;
+*)
+    printf "Usage: $0 [start|stop|list] ...\n\n"
+    printf "  start [date] [audio_path]     - runs alarm, date must be in 'YYYY-MM-DD hh:mm' or hh:mm format\n"
+    printf "  stop [index]                  - stops alarm by index\n"
+    printf "  list                          - list active alarm sessions\n"
+esac
+
