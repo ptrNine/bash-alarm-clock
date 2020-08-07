@@ -2,6 +2,7 @@
 
 CURRENT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" >/dev/null 2>&1 && pwd )"
 ALARM_DATA_DIR="$CURRENT_DIR/.alarm"
+ALARM_PID="$ALARM_DATA_DIR/alarm.pid"
 
 mkdir -p "$ALARM_DATA_DIR"
 
@@ -37,41 +38,56 @@ date_to_timestamp() {
 
 get_free_index() {
     local i=0
-    while test -f "$ALARM_DATA_DIR/$i.pid"; do i=$((i+1)); done
+    while test -f "$ALARM_DATA_DIR/$i.time"; do i=$((i+1)); done
     echo "$i"
 }
 
-run_alarm() {
+run_alarm_service() {
+    pushd "$ALARM_DATA_DIR" > /dev/null 2>&1
+    while sleep 1; do
+        for timefile in ./*.time ; do
+            if [ ! -f "$timefile" ]; then
+                rm -f "$ALARM_PID"
+                return 0
+            fi
+
+            tmst=`get_timestamp`
+            if [ $tmst -gt $(cat "$timefile") ]; then
+                index="${timefile%*.time}"
+                index="${index##*/}"
+                "./$index.action"
+                rm -f "$timefile"
+                rm -f "$index.action"
+            fi
+        done
+    done
+}
+
+add_alarm() {
     local alarm_time=$(date_to_timestamp "$1")
     local index="$2"
     local action="$3"
-
-    echo $(get_date "$1") > "$ALARM_DATA_DIR/$index.time"
 
     echo "#!/bin/bash" > "$ALARM_DATA_DIR/$index.action"
     echo "$action" >> "$ALARM_DATA_DIR/$index.action"
     chmod +x "$ALARM_DATA_DIR/$index.action"
 
-    while sleep 0.5; do
-        tmst=$(get_timestamp)
-        if [ $tmst -gt $alarm_time ]; then
-            "$ALARM_DATA_DIR/$index.action"
-            rm -f "$ALARM_DATA_DIR/$index.pid"
-            rm -f "$ALARM_DATA_DIR/$index.action"
-            rm -f "$ALARM_DATA_DIR/$index.time"
-            exit 0
-        fi
-    done
+    echo "$alarm_time" > "$ALARM_DATA_DIR/$index.time"
+
+    if [ ! -f "$ALARM_PID" ]; then
+        run_alarm_service & echo $! > "$ALARM_PID"
+    fi
 }
 
 list_alarms() {
     echo "Active alarms: "
     IFS=$'\n'
-    local pid_files=($(find "$ALARM_DATA_DIR" -name '*.pid'))
-    for pidfile in ${pid_files[@]}; do
-        index="${pidfile%*.pid}"
+    local timefiles=($(find "$ALARM_DATA_DIR" -name '*.time'))
+    for timefile in ${timefiles[@]}; do
+        index="${timefile%*.time}"
         index="${index##*/}"
-        printf "$index:\t`cat $ALARM_DATA_DIR/$index.time`\n\tAction:\n"
+        tmst=$(cat "$timefile")
+        printf "$index:\t`timestamp_to_date "$tmst"`\n\tAction:\n"
         readarray -t action < "$ALARM_DATA_DIR/$index.action"
         for line in ${action[@]}; do
             echo $'\t\t'"$line"
@@ -81,18 +97,23 @@ list_alarms() {
 
 stop_alarm() {
     local index="$1"
-    if test -f "$ALARM_DATA_DIR/$index.pid"; then
-        pid=$(cat "$ALARM_DATA_DIR/$index.pid")
-        if [ -d "/proc/$pid" ]; then
-            echo "Kill alarm process with pid $pid"
-            kill $pid
-        fi
-        rm -f "$ALARM_DATA_DIR/$index.pid"
-        rm -f "$ALARM_DATA_DIR/$index.action"
+    if test -f "$ALARM_DATA_DIR/$index.time"; then
         rm -f "$ALARM_DATA_DIR/$index.time"
+        rm -f "$ALARM_DATA_DIR/$index.action"
+        echo "Alarm with index $index stoped"
     else
         echoerr "Alarm with index $index does not exist!"
     fi
+}
+
+stop_all_alarms() {
+    IFS=$'\n'
+    local timefiles=($(find "$ALARM_DATA_DIR" -name '*.time'))
+    for timefile in ${timefiles[@]}; do
+        index="${timefile%*.time}"
+        index="${index##*/}"
+        stop_alarm "$index"
+    done
 }
 
 case "$1" in
@@ -110,12 +131,15 @@ start)
         command="pactl set-sink-volume 0 150% && celluloid \"$audio\""
     fi
 
-    run_alarm "$2" "$idx" "$command &" & \
-        echo $! > "$ALARM_DATA_DIR/$idx.pid"
+    add_alarm "$2" "$idx" "$command &"
     echo "Alarm with index $idx started."
     ;;
 stop)
-    [ -n "$2" ] && stop_alarm "$2" || echoerr "Missing alarm index"
+    if [ -n "$2" ]; then
+        [ "$2" = 'all' ] && stop_all_alarms || stop_alarm "$2"
+    else
+        echoerr "Missing alarm index"
+    fi
     ;;
 list)
     list_alarms
